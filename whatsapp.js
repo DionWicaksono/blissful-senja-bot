@@ -1,6 +1,6 @@
 // Sends a text message via WhatsApp Cloud API
 export async function sendWhatsApp(to, text) {
-  const url = `https://graph.facebook.com/v19.0/${process.env.WA_PHONE_NUMBER_ID}/messages`;
+  const url = `https://graph.facebook.com/v25.0/${process.env.WA_PHONE_NUMBER_ID}/messages`;
 
   const payload = {
     messaging_product: "whatsapp",
