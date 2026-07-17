@@ -24,11 +24,30 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
   try {
-    const entry = req.body?.entry?.[0];
-    const change = entry?.changes?.[0];
-    const msg = change?.value?.messages?.[0];
+    console.log("Incoming webhook body:", JSON.stringify(req.body, null, 2));
 
-    if (!msg || msg.type !== "text") return; // ignore non-text for now
+    const entry = req.body?.entry?.[0];
+    if (!entry) {
+      console.log("No entry found in webhook payload. req.body:", JSON.stringify(req.body));
+      return;
+    }
+
+    const change = entry?.changes?.[0];
+    if (!change) {
+      console.log("No changes found in entry. entry:", JSON.stringify(entry));
+      return;
+    }
+
+    const msg = change?.value?.messages?.[0];
+    if (!msg) {
+      console.log("No message found in change.value. change.value:", JSON.stringify(change?.value));
+      return;
+    }
+
+    if (msg.type !== "text") {
+      console.log(`Ignoring non-text message. msg.type=${msg.type}, msg:`, JSON.stringify(msg));
+      return; // ignore non-text for now
+    }
 
     const from = msg.from;           // customer's WA number
     const text = msg.text.body;
