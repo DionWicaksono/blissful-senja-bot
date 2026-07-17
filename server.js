@@ -3,6 +3,7 @@ import { handleIncoming } from "./bot.js";
 
 const app = express();
 app.use(express.json());
+app.get("/", (_req, res) => res.status(200).send("Blissful Senja bot is running"));
 
 // ── Meta webhook verification ──────────────────────────────────────────────
 app.get("/webhook", (req, res) => {
@@ -40,4 +41,7 @@ app.post("/webhook", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`Bot listening on port ${PORT}`));
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`✓ Bot listening on 0.0.0.0:${PORT}`);
+  console.log(`✓ Env check: WA_TOKEN=${!!process.env.WA_TOKEN}, ANTHROPIC=${!!process.env.ANTHROPIC_API_KEY}, VERIFY=${!!process.env.VERIFY_TOKEN}`);
+});
