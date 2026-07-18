@@ -1,6 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 //  bot.js — Handles inbound WhatsApp messages, calls Claude, sends replies
 //  Uses Supabase for persistent sessions (see db.js)
+//  Emits SSE events for the /admin dashboard live view
 // ═══════════════════════════════════════════════════════════════════════════
 import Anthropic from "@anthropic-ai/sdk";
 import { sendWhatsApp } from "./whatsapp.js";
@@ -12,35 +13,56 @@ import {
   setBotPaused,
   markEscalated,
   isBotGloballyEnabled,
+  setCustomerName,
 } from "./db.js";
 
 const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+// ── Tiny event bus for SSE clients ─────────────────────────────────────────
+const listeners = new Set();
+export function subscribe(fn) {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+}
+export function emitEvent(event) {
+  for (const fn of listeners) {
+    try { fn(event); } catch {}
+  }
+}
+
 // ── Main handler ───────────────────────────────────────────────────────────
-export async function handleIncoming(phone, userText) {
-  // ── Admin commands (sent from your own number or via curl for testing) ──
+export async function handleIncoming(phone, userText, profileName) {
+  // Save/refresh customer name from WhatsApp profile if we got one
+  if (profileName) {
+    try { await setCustomerName(phone, profileName); } catch {}
+  }
+
+  // ── Admin commands (sent from your own number for quick control) ──
   const cmd = userText.trim().toLowerCase();
   if (cmd === "/pause") {
     await setBotPaused(phone, true);
     console.log(`Bot paused for ${phone}`);
+    emitEvent({ type: "session_updated", phone });
     return;
   }
   if (cmd === "/resume") {
     await setBotPaused(phone, false);
     console.log(`Bot resumed for ${phone}`);
+    emitEvent({ type: "session_updated", phone });
     return;
   }
 
-  // ── Always log the customer's message, even if we won't reply ──
+  // ── Always log the customer's message immediately (before any bot logic) ──
   await addToHistory(phone, "user", userText);
+  emitEvent({ type: "message", phone, role: "user", content: userText });
 
-  // ── Check global master switch ──
+  // ── Global master switch ──
   if (!(await isBotGloballyEnabled())) {
     console.log(`Bot globally disabled — not replying to ${phone}`);
     return;
   }
 
-  // ── Check per-customer pause (human takeover) ──
+  // ── Per-customer pause (human takeover) ──
   if (await isBotPaused(phone)) {
     console.log(`Bot paused for ${phone} — not replying`);
     return;
@@ -63,16 +85,18 @@ export async function handleIncoming(phone, userText) {
       "Sorry, I'm having a moment! Please WhatsApp us directly or call — we're available 24/7.";
   }
 
-  // ── Handle escalation flag from Claude ──
+  // ── Handle escalation flag ──
   const shouldEscalate = replyText.includes("[ESCALATE]");
   if (shouldEscalate) {
     replyText = replyText.replace("[ESCALATE]", "").trim();
-    await markEscalated(phone); // marks escalated=true AND bot_paused=true
+    await markEscalated(phone);
     await notifyTherapist(phone, userText);
+    emitEvent({ type: "session_updated", phone });
   }
 
-  // ── Log the bot's reply, then send it ──
+  // ── Log + send ──
   await addToHistory(phone, "assistant", replyText);
+  emitEvent({ type: "message", phone, role: "assistant", content: replyText });
 
   try {
     await sendWhatsApp(phone, replyText);
@@ -80,6 +104,17 @@ export async function handleIncoming(phone, userText) {
   } catch (err) {
     console.error(`[${phone}] Failed to send reply:`, err.message);
   }
+}
+
+// ── Admin sends a manual reply from the dashboard ──────────────────────────
+export async function sendAdminReply(phone, text) {
+  // Auto-pause bot when admin steps in, so bot doesn't reply on top
+  await setBotPaused(phone, true);
+  await addToHistory(phone, "admin", text);
+  emitEvent({ type: "message", phone, role: "admin", content: text });
+  emitEvent({ type: "session_updated", phone });
+  await sendWhatsApp(phone, text);
+  console.log(`[${phone}] ← (admin) ${text}`);
 }
 
 // ── Alert the on-call therapist ────────────────────────────────────────────
