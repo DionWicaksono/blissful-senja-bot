@@ -1,40 +1,61 @@
+// ═══════════════════════════════════════════════════════════════════════════
+//  bot.js — Handles inbound WhatsApp messages, calls Claude, sends replies
+//  Uses Supabase for persistent sessions (see db.js)
+// ═══════════════════════════════════════════════════════════════════════════
 import Anthropic from "@anthropic-ai/sdk";
 import { sendWhatsApp } from "./whatsapp.js";
 import { SYSTEM_PROMPT } from "./knowledge.js";
+import {
+  getHistory,
+  addToHistory,
+  isBotPaused,
+  setBotPaused,
+  markEscalated,
+  isBotGloballyEnabled,
+} from "./db.js";
 
 const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-// ── In-memory conversation history (keyed by phone number) ─────────────────
-// For production, swap this Map for Redis or Supabase
-const sessions = new Map();
-const MAX_HISTORY = 10; // keep last 10 turns per customer
-
-function getHistory(phone) {
-  if (!sessions.has(phone)) sessions.set(phone, []);
-  return sessions.get(phone);
-}
-
-function addToHistory(phone, role, content) {
-  const history = getHistory(phone);
-  history.push({ role, content });
-  // Keep only the last MAX_HISTORY messages
-  if (history.length > MAX_HISTORY) history.splice(0, history.length - MAX_HISTORY);
-}
-
 // ── Main handler ───────────────────────────────────────────────────────────
 export async function handleIncoming(phone, userText) {
-  addToHistory(phone, "user", userText);
+  // ── Admin commands (sent from your own number or via curl for testing) ──
+  const cmd = userText.trim().toLowerCase();
+  if (cmd === "/pause") {
+    await setBotPaused(phone, true);
+    console.log(`Bot paused for ${phone}`);
+    return;
+  }
+  if (cmd === "/resume") {
+    await setBotPaused(phone, false);
+    console.log(`Bot resumed for ${phone}`);
+    return;
+  }
 
+  // ── Always log the customer's message, even if we won't reply ──
+  await addToHistory(phone, "user", userText);
+
+  // ── Check global master switch ──
+  if (!(await isBotGloballyEnabled())) {
+    console.log(`Bot globally disabled — not replying to ${phone}`);
+    return;
+  }
+
+  // ── Check per-customer pause (human takeover) ──
+  if (await isBotPaused(phone)) {
+    console.log(`Bot paused for ${phone} — not replying`);
+    return;
+  }
+
+  // ── Ask Claude for a reply ──
   let replyText;
-
   try {
+    const history = await getHistory(phone);
     const response = await claude.messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 400,
       system: SYSTEM_PROMPT,
-      messages: getHistory(phone),
+      messages: history,
     });
-
     replyText = response.content[0].text.trim();
   } catch (err) {
     console.error("Claude API error:", err);
@@ -42,16 +63,23 @@ export async function handleIncoming(phone, userText) {
       "Sorry, I'm having a moment! Please WhatsApp us directly or call — we're available 24/7.";
   }
 
-  addToHistory(phone, "assistant", replyText);
-
-  // Check if Claude flagged escalation
-  if (replyText.includes("[ESCALATE]")) {
+  // ── Handle escalation flag from Claude ──
+  const shouldEscalate = replyText.includes("[ESCALATE]");
+  if (shouldEscalate) {
     replyText = replyText.replace("[ESCALATE]", "").trim();
+    await markEscalated(phone); // marks escalated=true AND bot_paused=true
     await notifyTherapist(phone, userText);
   }
 
-  await sendWhatsApp(phone, replyText);
-  console.log(`[${phone}] ← ${replyText}`);
+  // ── Log the bot's reply, then send it ──
+  await addToHistory(phone, "assistant", replyText);
+
+  try {
+    await sendWhatsApp(phone, replyText);
+    console.log(`[${phone}] ← ${replyText}`);
+  } catch (err) {
+    console.error(`[${phone}] Failed to send reply:`, err.message);
+  }
 }
 
 // ── Alert the on-call therapist ────────────────────────────────────────────
@@ -63,8 +91,13 @@ async function notifyTherapist(customerPhone, urgentMessage) {
     `🚨 *Escalation needed*\n` +
     `Customer: ${customerPhone}\n` +
     `Message: "${urgentMessage}"\n` +
-    `Please follow up ASAP.`;
+    `Bot has been paused for this customer.\n` +
+    `Please follow up ASAP, then send /resume in that chat when done.`;
 
-  await sendWhatsApp(therapistPhone, alert);
-  console.log(`Escalation alert sent to therapist (${therapistPhone})`);
+  try {
+    await sendWhatsApp(therapistPhone, alert);
+    console.log(`Escalation alert sent to therapist (${therapistPhone})`);
+  } catch (err) {
+    console.error("Failed to send escalation alert:", err.message);
+  }
 }
